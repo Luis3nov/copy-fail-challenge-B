@@ -85,6 +85,8 @@ mount -t devtmpfs none /dev 2>/dev/null || /bin/busybox mdev -s
 mount -t tmpfs none /tmp
 
 # Cargar módulos crypto vulnerables si están como módulos
+echo "DEBUG INIT START"
+echo "DEBUG AUTHENC"
 /bin/busybox modprobe algif_aead 2>/dev/null || true
 /bin/busybox modprobe authencesn 2>/dev/null || true
 
