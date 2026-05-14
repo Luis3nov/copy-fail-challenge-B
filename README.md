@@ -1,278 +1,338 @@
-# Copy Fail Lab — CVE-2026-31431 (v2)
+# Informe técnico de solución propia
+## CVE-2026-31431 "Copy Fail"
+### Evaluación práctica de UNIX - Compilación, ejecución en QEMU, explotación controlada y parche del kernel Linux 6.12
 
-Devcontainer reproducible para experimentar con la vulnerabilidad **Copy Fail**
-(CVE-2026-31431) en un kernel Linux 6.12 controlado dentro de QEMU.
-
-Esta v2 incorpora todas las correcciones aprendidas en una sesión de debugging
-exhaustiva: opciones de kernel necesarias para que arranque, configuración
-correcta de BusyBox estático, rutas dinámicas independientes del nombre del repo,
-y dependencias Ubuntu 24.04 corregidas.
+**Luis Novillo – 13/05/2026**
 
 ---
 
-## Inicio rápido para el estudiante
+## 1. Contexto
 
-1. Abre un Codespace desde este repo.
-   ```bash
-   #CONFIGURACION DE EJEMPLO!!!!!!!!!!!
-   apt update
-   apt install gh
-   
-   gh api user --jq '"\(.name) → \(.email // .login)"'
-   
-   git config --global user.name "Jonathan E. Tito O."
-   git config --global user.email "jonathantito@users.noreply.github.com"
-   git config --global --add safe.directory /workspaces/copy-fail-challenge-1
-   make setup
-   ```
-3. Configura tu identidad git:
-   ```bash
-   git config --global user.name "Tu Nombre"
-   git config --global user.email "tu@correo.com"
-   ```
-4. Ejecuta:
-   ```bash
-   make setup    # descarga kernel + arma rootfs (~5 min)
-   make qemu     # arranca la VM vulnerable
-   ```
+La evaluación consistía en reproducir en un ambiente controlado la vulnerabilidad CVE-2026-31431, conocida como "Copy Fail". El objetivo era demostrar el ciclo completo de trabajo con un kernel vulnerable: compilarlo, ejecutarlo en una máquina virtual, comprobar la vulnerabilidad, aplicar un parche permanente y verificar que el mismo script de prueba ya no consiguiera privilegios de root.
 
-Para salir de QEMU: `Ctrl+A` luego `X`.
+El procedimiento original indicaba usar comandos automáticos del repositorio entregado por el profesor, como `make setup` y `make qemu`. Sin embargo, ese entorno presentó errores en Codespaces. Por esa razón, se construyó una solución propia y manual, manteniendo la lógica de la evaluación: kernel vulnerable, prueba controlada, parche y verificación.
 
 ---
 
-## Configuración inicial del docente (una sola vez)
+## 2. Solución propuesta
 
-### 1. Subir este repo a GitHub
+La solución propuesta consistió en reconstruir manualmente el entorno vulnerable descargando y compilando manualmente el kernel Linux 6.12 desde el código fuente utilizando GitHub Codespaces. Posteriormente, se habilitó el soporte criptográfico necesario (AF_ALG) requerido por el exploit, se creó un root filesystem funcional y se arrancó el kernel compilado mediante una máquina virtual (QEMU). Una vez validado el entorno vulnerable, se ejecutó el exploit Python dentro de la máquina virtual, logrando escalar privilegios desde el usuario `student` hasta `root`. Finalmente, se identificó y corrigió la lógica vulnerable en el archivo `crypto/algif_aead.c`, se recompiló el kernel y se verificó que el exploit ya no podía obtener privilegios elevados, demostrando así que el parche aplicado solucionaba correctamente la vulnerabilidad CVE-2026-31431 "Copy Fail".
+
+---
+
+## 3. Preparación del entorno en Codespaces
+
+Primero se instalaron las herramientas necesarias para compilar el kernel, crear el root filesystem y arrancar QEMU.
 
 ```bash
-cd copyfail-v2
-git init && git add -A && git commit -m "initial"
-git branch -M main
-gh repo create TU-ORG/copy-fail-lab --public --source=. --push
+sudo apt update
+sudo apt install -y build-essential libncurses-dev bison flex libssl-dev libelf-dev bc dwarves cpio \
+gzip qemu-system-x86 busybox-static debootstrap kmod
 ```
 
-### 2. Marcarlo como Template
+**Propósito de los paquetes principales:**
 
-GitHub → tu repo → Settings → marcar `Template repository`.
-
-### 3. Editar `.devcontainer/devcontainer.json`
-
-Cambia el valor `KERNEL_REPO`:
-```json
-"KERNEL_REPO": "TU-ORG/copy-fail-lab"
-```
-
-Commit y push.
-
-### 4. Disparar el workflow del kernel
-
-GitHub → Actions → `Build Vulnerable Kernel` → Run workflow.
-Tarda ~25 min en los servidores de GitHub (no en tu Codespace).
-Al terminar crea un Release con el `bzImage_vuln` listo para descarga.
-
-### 5. Verificar
-
-Tu repo → Releases → debe aparecer `kernel-v6.12-vuln` con tres archivos
-adjuntos. Los estudiantes ahora pueden hacer `make setup` y descarga en 2 min.
+- `build-essential`, `bison`, `flex`, `bc`, `libssl-dev`, `libelf-dev` y `dwarves`: dependencias para compilar Linux.
+- `qemu-system-x86`: permite arrancar el kernel compilado dentro de una VM.
+- `debootstrap`: permite construir un rootfs mínimo de Ubuntu/Debian.
+- `cpio` y `gzip`: sirven para empaquetar el rootfs como initramfs.
+- `kmod`: provee herramientas como `depmod` y `modprobe`.
 
 ---
 
-## Estructura del repo
+## 4. Descarga y compilación manual del kernel Linux 6.12
 
-```
-.
-├── .devcontainer/
-│   ├── Dockerfile             ← Ubuntu 24.04 + deps verificadas
-│   └── devcontainer.json      ← sin rutas hardcodeadas
-├── .github/workflows/
-│   └── build-kernel.yml       ← compila kernel y crea Release
-├── scripts/
-│   ├── 00_welcome.sh
-│   ├── 01_fetch_kernel.sh     ← descarga del Release
-│   ├── 02_build_kernel.sh     ← fallback: compila desde fuente
-│   ├── 03_build_rootfs.sh     ← BusyBox estático + initramfs
-│   └── 04_run_qemu.sh
-├── Makefile
-└── README.md
+Como el repositorio original fallaba, se descargó manualmente el código fuente oficial de Linux 6.12 y se compiló desde cero.
+
+```bash
+mkdir -p ~/kernel-lab
+cd ~/kernel-lab
+wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.tar.xz
+tar -xf linux-6.12.tar.xz
+cd linux-6.12
+make defconfig
+make -j2
 ```
 
----
+**Explicación de los comandos:**
 
-## Comandos disponibles
+- `mkdir -p ~/kernel-lab` crea el directorio de trabajo.
+- `wget` descarga el código fuente del kernel Linux 6.12.
+- `tar -xf` extrae el archivo comprimido.
+- `make defconfig` genera una configuración base para compilar el kernel.
+- `make -j2` compila el kernel usando dos procesos en paralelo, opción más estable para Codespaces.
 
-| Comando | Acción |
-|---|---|
-| `make setup` | Descarga kernel + arma rootfs (~5 min) |
-| `make qemu` | Arranca la VM vulnerable |
-| `make info` | Muestra el estado del ambiente |
-| `make rootfs` | Reconstruye solo el initramfs |
-| `make fetch-kernel` | Solo descarga el bzImage del Release |
-| `make build-kernel` | Compila kernel desde fuente (~25 min) |
-| `make clean` | Borra builds (mantiene fuentes) |
-| `make clean-all` | Borra todo |
+Después de la compilación se verificó que los archivos principales existieran:
 
----
+```bash
+ls -lh arch/x86/boot/bzImage
+ls -lh vmlinux
+make kernelrelease
+```
 
-## Recursos del CVE
-
-- Write-up técnico: https://xint.io/blog/copy-fail-linux-distributions
-- Sitio del CVE: https://copy.fail
-- PoC oficial: https://github.com/theori-io/copy-fail-CVE-2026-31431
+- `bzImage` confirmó que el kernel arrancable fue generado correctamente.
+- `vmlinux` confirmó que también existe la imagen del kernel sin comprimir.
+- `make kernelrelease` permitió confirmar la versión compilada.
 
 ---
 
-## Lecciones aprendidas (referencia para futuras versiones)
+## 5. Activación de AF_ALG y soporte criptográfico necesario
 
-Esta v2 incorpora los siguientes fixes respecto a la v1:
+Al probar el script inicialmente apareció el error `"Address family not supported by protocol"`. Ese error significaba que el kernel arrancado no tenía disponible AF_ALG, la familia de sockets usada para acceder al subsistema criptográfico desde espacio de usuario.
 
-- `hexdump` → `bsdextrautils` en Ubuntu 24.04
-- `bzip2` agregado al Dockerfile (lo necesita BusyBox)
-- Eliminado el `mounts` con ruta hardcodeada en `devcontainer.json`
-- Todos los scripts detectan workspace con `SCRIPT_DIR` dinámico
-- Kernel: agregadas opciones críticas `BINFMT_ELF`, `BINFMT_SCRIPT`, `RD_GZIP`
-- Kernel: agregada dep `CRYPTO_AEAD` antes de `CRYPTO_AUTHENCESN`
-- BusyBox: reemplazado `scripts/config` (no existe) por `sed`
-- BusyBox: eliminado `olddefconfig` (no existe en BusyBox)
-- BusyBox: deshabilitado `CONFIG_TC` (rompe compilación con kernels nuevos)
-- BusyBox: forzado `CONFIG_STATIC=y` y verificado con `file`
-- Workflow Actions: greps de verificación con `|| echo`, tolerantes
+Primero se intentó usar módulos, pero en el entorno mínimo de QEMU los módulos existían y aun así no se cargaban correctamente. La solución más estable fue compilar esas opciones directamente dentro del kernel, usando `--enable` en lugar de `--module`.
 
+```bash
+cd ~/kernel-lab/linux-6.12
+scripts/config --enable CONFIG_CRYPTO_USER_API && scripts/config --enable CONFIG_CRYPTO_USER_API_AEAD \
+&& scripts/config --enable CONFIG_CRYPTO_USER_API_SKCIPHER && scripts/config --enable \
+CONFIG_CRYPTO_AUTHENC && scripts/config --enable CONFIG_CRYPTO_AUTHENCESN && scripts/config --enable \
+CONFIG_CRYPTO_CBC && scripts/config --enable CONFIG_CRYPTO_SHA256 && scripts/config --enable \
+CONFIG_CRYPTO_AES
+make olddefconfig
+make -j2
+```
 
+Después de recompilar, se verificó dentro de QEMU que AF_ALG estuviera disponible ejecutando una prueba mínima de Python:
 
+```python
+python3 - <<'PY'
+import socket
+print(socket.AF_ALG)
+s = socket.socket(socket.AF_ALG, socket.SOCK_SEQPACKET, 0)
+print("AF_ALG OK")
+PY
+```
 
+La salida `"AF_ALG OK"` confirmó que el kernel ya aceptaba sockets AF_ALG y que el script de prueba podía ejecutarse en el entorno correcto.
 
+---
 
-11/05/2026
- 1  apt update
-    2  apt install gh
-    3  gh api user --jq '"\(.name) → \(.email // .login)"'
-    4  git config --global user.name "Luis A. Novillo C."
-    5  git config --global user.email "luis3novillo@gmail.com"
-    6  git config --global --add safe.directory /workspaces/copy-fail-challenge-1
-    7  make setup
-    8  make qemu
-    9  apt update
-   10  apt install -y file
-   11  make rootfs
-   12  make qemu
-   13  make setup
-   14  make qemu
-   15  make clean
-   16  make setup
-   17  make qemu
-   18  make clean
-   19  make setup
-   20  make qemu
-   21  find . -name "*.qcow2"
-   22  find . -name "*rootfs*"
-   23  sed -n '1,220p' scripts/03_build_rootfs.sh
-   24  grep -n "chmod\|su\|student\|python" scripts/03_build_rootfs.sh
-   25  find build -name su -exec ls -l {} \;
-   26  find . -type f -name su -exec ls -l {} \;
-   27  find . -type d -name "*initramfs*"
-   28  find . -name "initramfs.cpio.gz" -o -name "*.cpio.gz"
-   29  mkdir /tmp/initramfs_test
-   30  cd /tmp/initramfs_test
-   31  gzip -dc /workspaces/copy-fail-challenge/kernel/build/initramfs.cpio.gz | cpio -idmv
-   32  rm -rf /tmp/initramfs_test
-   33  mkdir /tmp/initramfs_test
-   34  cd /tmp/initramfs_test
-   35  gzip -dc /workspaces/copy-fail-challenge-B/kernel/build/initramfs.cpio.gz | cpio -idmv
-   36  ls -l bin/su
-   37  cd /tmp
-   38  wget https://copy.fail/exp -O copy_fail_exp.py
-   39  head -40 copy_fail_exp.py
-   40  make qemu
-   41  cd..
-   42  cd ..
-   43  cd /workspaces/copy-fail-challenge-B
-   44  make qemu
-   45  cd /tmp/initramfs_test
-   46  mkdir -p usr/bin
-   47  ln -s /bin/su usr/bin/su
-   48  find . | cpio -o -H newc 2>/dev/null | gzip > /workspaces/copy-fail-challenge-B/kernel/build/initramfs.cpio.gz
-   49  cd /workspaces/copy-fail-challenge-B
-   50  make qemu
-   51  cd /tmp/initramfs_test
-   52  chmod 755 .
-   53  chmod 755 home
-   54  chmod 755 home/student
-   55  chmod 755 root
-   56  chmod 755 usr
-   57  chmod 755 usr/bin
-   58  chmod 755 bin
-   59  chown -R root:root .
-   60  chown 1001:1001 home/student
-   61  ls -l usr/bin/su
-   62  ls -ld . home home/student usr usr/bin
-   63  find . | cpio -o -H newc 2>/dev/null | gzip > /workspaces/copy-fail-challenge-B/kernel/build/initramfs.cpio.gz
-   64  cd /workspaces/copy-fail-challenge-B
-   65  make qemu
-   66  grep -R "python3\|copy_fail\|exp\|wget" -n .
-   67  ls -R scripts
-   68  ls
-   69  which python3
-   70  python3 --version
-   71  ldd $(which python3)
-   72  cd /tmp/initramfs_test
-   73  mkdir -p usr/bin usr/lib lib/x86_64-linux-gnu lib64
-   74  cp /usr/bin/python3 usr/bin/python3
-   75  cp -a /usr/lib/python3.12 usr/lib/
-   76  cp /lib/x86_64-linux-gnu/libm.so.6 lib/x86_64-linux-gnu/
-   77  cp /lib/x86_64-linux-gnu/libz.so.1 lib/x86_64-linux-gnu/
-   78  cp /lib/x86_64-linux-gnu/libexpat.so.1 lib/x86_64-linux-gnu/
-   79  cp /lib/x86_64-linux-gnu/libc.so.6 lib/x86_64-linux-gnu/
-   80  cp /lib64/ld-linux-x86-64.so.2 lib64/
-   81  cp /tmp/copy_fail_exp.py home/student/copy_fail_exp.py
-   82  chown 1001:1001 home/student/copy_fail_exp.py
-   83  find . | cpio -o -H newc 2>/dev/null | gzip > /workspaces/copy-fail-challenge-B/kernel/build/initramfs.cpio.gz
-   84  cd /workspaces/copy-fail-challenge-B
-   85  make qemu
-   86  cd /tmp/initramfs_test
-   87  chmod 755 usr/bin/python3
-   88  chmod 755 usr
-   89  chmod 755 usr/bin
-   90  chmod 755 usr/lib
-   91  chmod -R a+rX usr/lib/python3.12
-   92  chmod 755 lib lib/x86_64-linux-gnu lib64
-   93  chmod 755 lib64/ld-linux-x86-64.so.2
-   94  chmod 755 lib/x86_64-linux-gnu/*.so*
-   95  find . | cpio -o -H newc 2>/dev/null | gzip > /workspaces/copy-fail-challenge-B/kernel/build/initramfs.cpio.gz
-   96  cd /workspaces/copy-fail-challenge-B
-   97  make qemu
-   98  find kernel -name "algif_aead*"
-   99  find kernel -name "authencesn*"
-  100  find kernel -name "*.ko" | grep -E "alg|auth"
-  101  grep -E "CONFIG_CRYPTO_USER_API_AEAD|CONFIG_CRYPTO_AUTHENC|CONFIG_CRYPTO_AUTHENCESN|CONFIG_CRYPTO_CBC|CONFIG_CRYPTO_SHA256|CONFIG_CRYPTO_AES" kernel/linux/.c
-  102  grep -E "CONFIG_CRYPTO_USER_API_AEAD|CONFIG_CRYPTO_AUTHENC|CONFIG_CRYPTO_AUTHENCESN|CONFIG_CRYPTO_CBC|CONFIG_CRYPTO_SHA256|CONFIG_CRYPTO_AES" kernel/linux/.cg
-  103  grep CONFIG_CRYPTO_AUTHENCESN kernel/linux/.config
-  104  cd /workspaces/copy-fail-challenge-B/kernel/linux
-  105  scripts/config --enable CRYPTO_AUTHENCESN
-  106  make olddefconfig
-  107  grep CONFIG_CRYPTO_AUTHENCESN .config
-  108  grep -R "authencesn\|AUTH" -n crypto/Kconfig crypto/Makefile
-  109  grep -R "authenc" -n crypto/Kconfig crypto/Makefile
-  110  grep CONFIG_CRYPTO_AUTHENC .config
-  111  cd /workspaces/copy-fail-challenge-B
-  112  make clean
-  113  make setup
-  114  make qemu
-  115  find /workspaces/copy-fail-challenge-B/kernel/linux -name "authencesn.o"
-  116  nm /workspaces/copy-fail-challenge-B/kernel/linux/crypto/authencesn.o | head
-  117  grep -R "authencesn" -n /workspaces/copy-fail-challenge-B/kernel/linux/crypto
-  118  make qemu
-  119  grep -E "CONFIG_CRYPTO_AEAD|CONFIG_CRYPTO_USER_API|CONFIG_NET" /workspaces/copy-fail-challenge-B/kernel/linux/.config
-  120  grep -E "CONFIG_CRYPTO_AEAD2|CONFIG_CRYPTO_MANAGER|CONFIG_CRYPTO_NULL" /workspaces/copy-fail-challenge-B/kernel/linux/.config
-  121  nano /workspaces/copy-fail-challenge-B/scripts/03_build_rootfs.sh
-  122  vi /workspaces/copy-fail-challenge-B/scripts/03_build_rootfs.sh
-  123  cd /workspaces/copy-fail-challenge-B
-  124  make clean
-  125  make setup
-  126  make qemu
-  127  grep -n "DEBUG\|modprobe" /workspaces/copy-fail-challenge-B/scripts/03_build_rootfs.sh
-  128  {   echo "=== HITO 1: KERNEL VULNERABLE CONFIRMADO ===";   echo "Fecha: $(date)";   echo "Hostname: $(hostname)";   echo "Kernel: $(uname -r)";   echo "Identt
-  129  mkdir -p evidence
-  130  vi evidence/hito1_vuln_confirmed.txt
-  131  git add evidence/hito1_vuln_confirmed.txt
-  132  git commit -m "hito-1: kernel vulnerable confirmado"
-  133  history
+## 6. Creación del rootfs para la VM
+
+El kernel por sí solo no basta para arrancar un sistema usable. También se necesitó un root filesystem con herramientas básicas, Python y un usuario normal `student`. Para eso se preparó un rootfs mínimo.
+
+```bash
+mkdir ~/rootfs
+sudo debootstrap --arch=amd64 jammy ~/rootfs http://archive.ubuntu.com/ubuntu/
+```
+
+Luego se ingresó al rootfs con chroot para instalar herramientas y crear el usuario `student`:
+
+```bash
+sudo chroot ~/rootfs
+apt update
+apt install -y python3 sudo passwd kmod
+useradd -m student
+passwd student
+exit
+```
+
+El usuario `student` fue importante porque la evaluación pedía demostrar que un usuario sin privilegios podía pasar a root. Si la VM inicia directamente como root, no se puede demostrar la escalación de privilegios.
+
+Finalmente, se empaquetó el rootfs como initramfs:
+
+```bash
+cd ~/rootfs
+find . | cpio -H newc -ov | gzip > ~/rootfs.cpio.gz
+```
+
+---
+
+## 7. Diferencia entre archivos en Codespaces y archivos dentro de QEMU
+
+Una parte importante fue entender que Codespaces y la VM de QEMU no comparten automáticamente el mismo sistema de archivos. Un archivo que existe en `/workspaces` dentro de Codespaces no aparece automáticamente dentro de `/home/student` en la VM.
+
+Por eso, si el script Python estaba en Codespaces, había que copiarlo al rootfs antes de arrancar QEMU o crearlo manualmente dentro de la VM.
+
+```bash
+cp /workspaces/copy-fail-challenge-B/copy_fail_exp.py ~/rootfs/home/student/copy_fail_exp.py
+chown 1000:1000 ~/rootfs/home/student/copy_fail_exp.py
+cd ~/rootfs
+find . | cpio -H newc -ov | gzip > ~/rootfs.cpio.gz
+```
+
+También se podía crear el archivo directamente dentro de QEMU con:
+
+```bash
+cat > copy_fail_exp.py
+# pegar el contenido del script
+# terminar con Ctrl + D
+```
+
+---
+
+## 8. Arranque del kernel vulnerable con QEMU
+
+Después de compilar el kernel y preparar el rootfs, se arrancó la VM con QEMU usando el `bzImage` compilado.
+
+```bash
+qemu-system-x86_64 -kernel ~/kernel-lab/linux-6.12/arch/x86/boot/bzImage -initrd ~/rootfs.cpio.gz -m \
+2048 -nographic -append "console=ttyS0 rdinit=/sbin/init"
+```
+
+**Este comando hace lo siguiente:**
+
+- `-kernel` indica qué kernel arrancar; en este caso, el `bzImage` compilado manualmente.
+- `-initrd` indica el rootfs empaquetado.
+- `-m 2048` asigna 2048 MB de RAM a la VM.
+- `-nographic` permite usar la VM desde la terminal.
+- `console=ttyS0` redirige la consola de la VM a la terminal.
+- `rdinit=/sbin/init` indica el proceso inicial dentro del rootfs.
+
+---
+
+## 9. Comprobación del entorno vulnerable
+
+Dentro de la VM se inició sesión como `student` y se comprobó la identidad y la versión del kernel.
+
+```bash
+whoami
+id
+uname -r
+```
+
+El resultado esperado antes de ejecutar el exploit era que `whoami` mostrara `student` y que `id` mostrara un usuario normal, no root. Además, `uname -r` confirmaba que la VM estaba ejecutando el kernel 6.12 compilado manualmente.
+
+```bash
+# Evidencia recomendada antes del exploit
+echo "=== HITO 1: KERNEL VULNERABLE ARRANCADO ===" > /tmp/hito1.txt
+date >> /tmp/hito1.txt
+uname -r >> /tmp/hito1.txt
+whoami >> /tmp/hito1.txt
+id >> /tmp/hito1.txt
+cat /tmp/hito1.txt
+```
+
+---
+
+## 10. Demostración de la vulnerabilidad con el script Python
+
+Luego se ejecutó el script Python del PoC dentro de la VM. El script no se ejecutó en Codespaces directamente, porque necesita interactuar con el kernel vulnerable en ejecución dentro de QEMU.
+
+```bash
+ls -lh copy_fail_exp.py
+python3 copy_fail_exp.py
+whoami
+id
+```
+
+Antes de ejecutar el script, la identidad era `student`. Después de ejecutar el script en el kernel vulnerable, la identidad cambió a `root`. Esto demostró que la vulnerabilidad estaba presente y que el entorno construido manualmente era funcional.
+
+---
+
+## 11. Aplicación del parche permanente
+
+Después de demostrar la vulnerabilidad, se salió de QEMU con `Ctrl + A` y luego `X`. El parche se aplicó en el código fuente del kernel, específicamente en el archivo:
+
+```
+crypto/algif_aead.c
+```
+
+La función relacionada era `_aead_recvmsg()`. El problema estaba en el uso incorrecto de scatterlists dentro de la operación AEAD. Conceptualmente, el exploit funcionaba porque el kernel seguía una ruta en la que los buffers de entrada y salida podían mezclarse de forma peligrosa.
+
+Primero se hizo una copia de seguridad del archivo original:
+
+```bash
+cd ~/kernel-lab/linux-6.12
+cp crypto/algif_aead.c crypto/algif_aead.c.bak
+```
+
+Luego se ubicó la línea relacionada con `aead_request_set_crypt`:
+
+```bash
+grep -n "aead_request_set_crypt" crypto/algif_aead.c
+```
+
+Se editó el archivo con `vi` porque `nano` no estaba disponible:
+
+```bash
+vi crypto/algif_aead.c
+```
+
+El cambio aplicado fue conceptual y puntual: cambiar el origen usado por la operación AEAD. La forma vulnerable usaba `rsgl_src` como origen. La corrección usó `tsgl->sg` como origen correcto.
+
+```c
+// Línea corregida
+aead_request_set_crypt(&areq->cra_u.aead_req, tsgl->sg,
+    areq->first_rsgl.sgl.sgl, used, ctx->iv);
+```
+
+La razón técnica del cambio es que `tsgl->sg` representa correctamente la lista de entrada/transmisión, mientras que `areq->first_rsgl.sgl.sgl` representa el destino de recepción. Así se evita que la operación use la ruta vulnerable que permitía la corrupción de memoria o page cache.
+
+---
+
+## 12. Generación del archivo de parche y recompilación
+
+Después de modificar el archivo, se generó un diff para dejar evidencia exacta del cambio aplicado.
+
+```bash
+mkdir -p ~/kernel-lab/patches
+diff -u crypto/algif_aead.c.bak crypto/algif_aead.c > ~/kernel-lab/patches/fix_algif_aead.patch
+cat ~/kernel-lab/patches/fix_algif_aead.patch
+```
+
+Luego se recompiló el kernel parcheado:
+
+```bash
+make -j2
+```
+
+Durante la recompilación aparecieron errores porque primero se intentó usar `tsgl` directamente, pero el compilador indicó que ese tipo no era `struct scatterlist *`. Luego se intentó `tsgl->sgl.sgl`, pero el compilador indicó que el miembro correcto era `sg`. Finalmente la línea correcta fue `tsgl->sg` y la compilación terminó correctamente.
+
+Después se verificó nuevamente que el kernel arrancable existiera:
+
+```bash
+ls -lh arch/x86/boot/bzImage
+```
+
+---
+
+## 13. Verificación del parche en QEMU
+
+Se arrancó nuevamente QEMU con el `bzImage` recompilado. Como el comando de arranque siempre apuntaba al mismo archivo `arch/x86/boot/bzImage`, al recompilar el kernel ya se estaba usando la versión parcheada.
+
+```bash
+qemu-system-x86_64 -kernel ~/kernel-lab/linux-6.12/arch/x86/boot/bzImage -initrd ~/rootfs.cpio.gz -m \
+2048 -nographic -append "console=ttyS0 rdinit=/sbin/init"
+```
+
+Dentro de la VM, se volvió a comprobar que el usuario inicial era `student`:
+
+```bash
+whoami
+id
+uname -r
+```
+
+Luego se ejecutó nuevamente el script de Python. Esta vez, después de ejecutarlo, `whoami` e `id` seguían mostrando `student`. Es decir, el exploit ya no logró obtener root.
+
+```bash
+python3 copy_fail_exp.py
+whoami
+id
+```
+
+---
+
+## 14. Explicación corta de por qué el parche funcionó
+
+El script Python funcionaba porque el kernel vulnerable permitía que una operación criptográfica AEAD usara una ruta incorrecta de buffers/scatterlists. Esa ruta hacía posible que el exploit provocara una escritura peligrosa en memoria asociada al page cache y terminara afectando el comportamiento de un binario con permisos setuid, logrando pasar de `student` a `root`.
+
+Al cambiar la llamada a `aead_request_set_crypt` para usar `tsgl->sg` como origen, se separó correctamente la entrada de la salida. El exploit dependía de la confusión anterior; al eliminar esa condición, el script podía ejecutarse, pero ya no conseguía la escalación de privilegios.
+
+---
+
+## 16. Conclusión final
+
+La solución propia reemplazó el flujo automático roto del repositorio original. Se compiló Linux 6.12 manualmente, se activó el soporte necesario de AF_ALG, se creó un rootfs con usuario `student`, se arrancó el kernel en QEMU y se demostró la escalación de privilegios dentro de un laboratorio controlado.
+
+Luego se corrigió el archivo `crypto/algif_aead.c`, se recompiló el kernel y se verificó que el mismo script ya no lograra cambiar la identidad de `student` a `root`. Esto demuestra que el parche aplicado neutralizó la condición vulnerable usada por el exploit.
+
+---
+
+## Bibliografía
+
+- OpenAI. (2026). ChatGPT (modelo GPT-5.5) https://chat.openai.com/
+- Theori. (2026). copy_fail_exp.py GitHub. https://github.com/theori-io/copy-fail-CVE-2026-31431/blob/main/copy_fail_exp.py
+- The Linux Kernel Organization. (2026). Linux kernel 6.12 source code [Código fuente]. kernel.org. https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.tar.xz
